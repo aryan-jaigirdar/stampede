@@ -1,0 +1,22 @@
+{
+  "requests": [
+    {
+      "method": "GET",
+      "url": "http://127.0.0.1:8080/products",
+      "weight": 6
+    },
+    {
+      "method": "GET",
+      "url": "http://127.0.0.1:8080/products/42",
+      "headers": { "Accept": "application/json" },
+      "weight": 3
+    },
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8080/cart",
+      "headers": { "Content-Type": "application/json" },
+      "body": "{\"product_id\": 42, \"quantity\": 1}",
+      "weight": 1
+    }
+  ]
+}
