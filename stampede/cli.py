@@ -6,15 +6,23 @@ import argparse
 import asyncio
 import socket
 import sys
+from dataclasses import replace
 from typing import Sequence
 
 from . import __version__
 from .client import parse_url
-from .report import LiveReporter, format_summary, write_json
+from .report import LiveReporter, format_summary, write_csv, write_json
 from .runner import RunConfig, run_load
-from .scenario import ALLOWED_METHODS, RequestSpec, ScenarioError, load_scenario, make_spec
+from .scenario import (
+    ALLOWED_METHODS,
+    RequestSpec,
+    ScenarioError,
+    load_scenario,
+    make_spec,
+    merge_headers,
+)
 
-__all__ = ["build_parser", "main"]
+__all__ = ["build_parser", "main", "parse_header_args"]
 
 _DEFAULT_DURATION = 10.0
 
@@ -93,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="'NAME: VALUE'",
-        help="extra request header in single URL mode, repeatable",
+        help="extra request header, repeatable; in scenario mode a per-request header overrides it",
     )
     parser.add_argument(
         "--body",
@@ -106,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="json_path",
         metavar="FILE",
         help="also write the full results to FILE as JSON",
+    )
+    parser.add_argument(
+        "--csv",
+        dest="csv_path",
+        metavar="FILE",
+        help="also write one row per request to FILE as CSV",
     )
     parser.add_argument(
         "--seed",
@@ -129,32 +143,53 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_header_args(raw_headers: Sequence[str]) -> dict[str, str]:
+    """Parse repeated ``'Name: value'`` header arguments into a dict.
+
+    Each argument is split on the first colon and both sides are trimmed,
+    so a value may itself contain colons. Raises ValueError with a clear
+    message when an argument has no colon or an empty name.
+    """
+    headers: dict[str, str] = {}
+    for raw in raw_headers:
+        name, sep, value = raw.partition(":")
+        if not sep or not name.strip():
+            raise ValueError(f"invalid header {raw!r}, expected 'Name: value'")
+        headers[name.strip()] = value.strip()
+    return headers
+
+
 def _load_specs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[RequestSpec]:
     if args.url and args.scenario:
         parser.error("give either a target URL or --scenario, not both")
     if not args.url and not args.scenario:
         parser.error("a target URL or a --scenario file is required")
 
+    try:
+        default_headers = parse_header_args(args.header)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     if args.scenario:
-        if args.header or args.body is not None:
-            parser.error("-H and --body apply only to single URL mode; put them in the scenario file")
+        if args.body is not None:
+            parser.error("--body applies only to single URL mode; put a body in the scenario file")
         try:
-            return load_scenario(args.scenario)
+            specs = load_scenario(args.scenario)
         except ScenarioError as exc:
             parser.error(str(exc))
+        if default_headers:
+            specs = [
+                replace(spec, headers=merge_headers(default_headers, spec.headers))
+                for spec in specs
+            ]
+        return specs
 
-    headers: dict[str, str] = {}
-    for raw in args.header:
-        name, sep, value = raw.partition(":")
-        if not sep or not name.strip():
-            parser.error(f"invalid header {raw!r}, expected 'Name: value'")
-        headers[name.strip()] = value.strip()
     body = args.body.encode("utf-8") if args.body is not None else None
     method = args.method.upper()
     if method not in ALLOWED_METHODS:
         parser.error(f"unsupported method {args.method!r} (expected one of: {', '.join(ALLOWED_METHODS)})")
     try:
-        return [make_spec(args.url, method=method, headers=headers, body=body)]
+        return [make_spec(args.url, method=method, headers=default_headers, body=body)]
     except ScenarioError as exc:
         parser.error(str(exc))
     raise AssertionError("unreachable")
@@ -217,7 +252,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     reporter = None if args.quiet else LiveReporter()
     try:
-        summary = asyncio.run(run_load(specs, config, reporter=reporter))
+        summary = asyncio.run(
+            run_load(
+                specs,
+                config,
+                reporter=reporter,
+                record_requests=args.csv_path is not None,
+            )
+        )
     except KeyboardInterrupt:
         print("stampede: interrupted", file=sys.stderr)
         return 130
@@ -225,6 +267,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(format_summary(summary))
     if args.json_path:
         write_json(summary, args.json_path)
+    if args.csv_path:
+        write_csv(summary.records, args.csv_path)
     if summary.completed == 0:
         return 1
     return 0

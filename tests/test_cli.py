@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from stampede.cli import build_parser, main
+from stampede.cli import _load_specs, build_parser, main, parse_header_args
 
 from tests.support import TestHTTPServer, free_tcp_port
 
@@ -76,6 +77,82 @@ class ParserTests(unittest.TestCase):
         self.assertIn("cannot resolve host", stderr)
 
 
+class HeaderParsingTests(unittest.TestCase):
+    def test_single_valid_header(self) -> None:
+        self.assertEqual(
+            parse_header_args(["Authorization: Bearer x"]),
+            {"Authorization": "Bearer x"},
+        )
+
+    def test_multiple_headers(self) -> None:
+        headers = parse_header_args(["Authorization: Bearer x", "X-Env: staging"])
+        self.assertEqual(headers, {"Authorization": "Bearer x", "X-Env": "staging"})
+
+    def test_trims_name_and_value(self) -> None:
+        self.assertEqual(parse_header_args(["  X-Env :  staging  "]), {"X-Env": "staging"})
+
+    def test_splits_on_first_colon_only(self) -> None:
+        # A value may itself contain colons, e.g. a bearer token or a time.
+        headers = parse_header_args(["Authorization: Bearer a:b:c"])
+        self.assertEqual(headers, {"Authorization": "Bearer a:b:c"})
+
+    def test_later_duplicate_wins(self) -> None:
+        headers = parse_header_args(["X-Env: one", "X-Env: two"])
+        self.assertEqual(headers, {"X-Env": "two"})
+
+    def test_missing_colon_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_header_args(["no-colon-here"])
+
+    def test_empty_name_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_header_args([": value-without-name"])
+
+
+class ScenarioDefaultHeaderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def write_scenario(self, content: object) -> Path:
+        path = self.dir / "scenario.json"
+        path.write_text(json.dumps(content), encoding="utf-8")
+        return path
+
+    def test_defaults_apply_and_per_request_headers_override(self) -> None:
+        scenario_path = self.write_scenario(
+            {
+                "requests": [
+                    {"url": "http://127.0.0.1:8080/a"},
+                    {
+                        "url": "http://127.0.0.1:8080/b",
+                        "headers": {"X-Env": "prod"},
+                    },
+                ]
+            }
+        )
+        parser = build_parser()
+        args = parser.parse_args(
+            ["--scenario", str(scenario_path), "-H", "X-Env: staging", "-H", "X-Common: 1"]
+        )
+        specs = _load_specs(args, parser)
+        # First request has no header of its own, so both defaults apply.
+        self.assertEqual(specs[0].headers, {"X-Env": "staging", "X-Common": "1"})
+        # Second request declares X-Env, which overrides the default; the
+        # unrelated default is still applied.
+        self.assertEqual(specs[1].headers, {"X-Env": "prod", "X-Common": "1"})
+
+    def test_override_is_case_insensitive(self) -> None:
+        scenario_path = self.write_scenario(
+            {"requests": [{"url": "http://127.0.0.1:8080/a", "headers": {"x-env": "prod"}}]}
+        )
+        parser = build_parser()
+        args = parser.parse_args(["--scenario", str(scenario_path), "-H", "X-Env: staging"])
+        specs = _load_specs(args, parser)
+        self.assertEqual(specs[0].headers, {"x-env": "prod"})
+
+
 class CliEndToEndTests(unittest.TestCase):
     server: TestHTTPServer
 
@@ -111,6 +188,38 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(payload["failed"], 0)
         self.assertEqual(payload["status_counts"], {"200": 20})
         self.assertGreater(payload["latency_ms"]["p95"], 0.0)
+
+    def test_single_url_run_with_csv_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "requests.csv"
+            code, stdout, _ = run_main(
+                [
+                    self.server.url("/ok"),
+                    "--requests",
+                    "20",
+                    "--concurrency",
+                    "3",
+                    "--quiet",
+                    "-H",
+                    "X-Test: 1",
+                    "--csv",
+                    str(csv_path),
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("requests completed   20", stdout)
+            with csv_path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.reader(handle))
+        self.assertEqual(rows[0], ["timestamp", "method", "url", "status", "latency_ms", "bytes"])
+        data_rows = rows[1:]
+        self.assertEqual(len(data_rows), 20)
+        for row in data_rows:
+            self.assertEqual(len(row), 6)
+            self.assertEqual(row[1], "GET")
+            self.assertTrue(row[2].endswith("/ok"))
+            self.assertEqual(row[3], "200")
+            self.assertGreater(float(row[4]), 0.0)
+            self.assertEqual(row[5], str(len(b"hello from the test server")))
 
     def test_post_with_header_and_body(self) -> None:
         code, stdout, _ = run_main(

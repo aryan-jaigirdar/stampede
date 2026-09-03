@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
-from typing import TextIO
+from datetime import datetime, timezone
+from typing import Iterable, TextIO
 
 from . import __version__
-from .metrics import FAILURE_CONNECTION, FAILURE_PROTOCOL, FAILURE_TIMEOUT, Summary
+from .metrics import FAILURE_CONNECTION, FAILURE_PROTOCOL, FAILURE_TIMEOUT, RequestRecord, Summary
 
-__all__ = ["LiveReporter", "format_summary", "human_bytes", "write_json"]
+__all__ = [
+    "CSV_COLUMNS",
+    "LiveReporter",
+    "format_summary",
+    "human_bytes",
+    "write_csv",
+    "write_json",
+]
+
+CSV_COLUMNS: tuple[str, ...] = ("timestamp", "method", "url", "status", "latency_ms", "bytes")
 
 
 def human_bytes(count: int) -> str:
@@ -86,6 +97,33 @@ def write_json(summary: Summary, path: str) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def write_csv(records: Iterable[RequestRecord], path: str) -> None:
+    """Write one row per finished request to ``path`` as CSV.
+
+    Columns, in order: ``timestamp`` (ISO 8601, UTC, when the request
+    started), ``method``, ``url``, ``status`` (the HTTP status code for a
+    completed request, or the failure category for a transport failure:
+    timeout, connection, or protocol), ``latency_ms`` (time to the
+    response or the failure, to three decimals), and ``bytes`` (response
+    body size, 0 for a failure).
+    """
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CSV_COLUMNS)
+        for record in records:
+            timestamp = datetime.fromtimestamp(record.timestamp, timezone.utc).isoformat()
+            writer.writerow(
+                [
+                    timestamp,
+                    record.method,
+                    record.url,
+                    record.outcome,
+                    f"{record.latency_ms:.3f}",
+                    record.body_bytes,
+                ]
+            )
 
 
 class LiveReporter:

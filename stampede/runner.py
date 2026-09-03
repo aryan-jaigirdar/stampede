@@ -52,6 +52,7 @@ async def run_load(
     config: RunConfig,
     *,
     reporter: LiveReporter | None = None,
+    record_requests: bool = False,
 ) -> Summary:
     """Run the load model and return a Summary of everything recorded.
 
@@ -59,13 +60,16 @@ async def run_load(
     reached; in-flight requests are allowed to finish. SIGINT stops the
     run gracefully where the platform supports signal handlers, so an
     interrupted run still reports what it measured.
+
+    When ``record_requests`` is true, the Summary also carries one
+    RequestRecord per finished request for per-request CSV export.
     """
     if config.duration is None and config.total_requests is None:
         raise ValueError("a duration or a total request cap is required")
     if config.concurrency < 1:
         raise ValueError("concurrency must be at least 1")
 
-    collector = Collector()
+    collector = Collector(keep_records=record_requests)
     picker = WeightedPicker(specs, random.Random(config.seed))
     stop = asyncio.Event()
     started = time.perf_counter()
@@ -95,20 +99,46 @@ async def run_load(
                     stop.set()
                     break
                 spec = picker.pick()
+                wall_start = time.time()
                 request_started = time.perf_counter()
                 try:
                     response = await client.request(
                         spec.method, spec.url, headers=spec.headers, body=spec.body
                     )
                 except TimeoutError:
-                    collector.record_failure(FAILURE_TIMEOUT)
+                    collector.record_failure(
+                        FAILURE_TIMEOUT,
+                        method=spec.method,
+                        url=spec.url,
+                        timestamp=wall_start,
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                    )
                 except ProtocolError:
-                    collector.record_failure(FAILURE_PROTOCOL)
+                    collector.record_failure(
+                        FAILURE_PROTOCOL,
+                        method=spec.method,
+                        url=spec.url,
+                        timestamp=wall_start,
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                    )
                 except OSError:
-                    collector.record_failure(FAILURE_CONNECTION)
+                    collector.record_failure(
+                        FAILURE_CONNECTION,
+                        method=spec.method,
+                        url=spec.url,
+                        timestamp=wall_start,
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                    )
                 else:
                     latency_ms = (time.perf_counter() - request_started) * 1000.0
-                    collector.record_success(latency_ms, response.status, len(response.body))
+                    collector.record_success(
+                        latency_ms,
+                        response.status,
+                        len(response.body),
+                        method=spec.method,
+                        url=spec.url,
+                        timestamp=wall_start,
+                    )
         finally:
             active_workers -= 1
             await client.aclose()

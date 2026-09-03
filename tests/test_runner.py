@@ -98,6 +98,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(200, summary.status_counts)
         self.assertIn(404, summary.status_counts)
 
+    async def test_records_are_captured_when_requested(self) -> None:
+        config = RunConfig(concurrency=2, duration=None, total_requests=6, timeout=5.0)
+        summary = await run_load([self.spec()], config, record_requests=True)
+        self.assertEqual(len(summary.records), 6)
+        for record in summary.records:
+            self.assertEqual(record.method, "GET")
+            self.assertTrue(record.url.endswith("/ok"))
+            self.assertEqual(record.outcome, "200")
+            self.assertGreater(record.timestamp, 0.0)
+            self.assertGreater(record.latency_ms, 0.0)
+            self.assertGreater(record.body_bytes, 0)
+
+    async def test_records_are_empty_by_default(self) -> None:
+        config = RunConfig(concurrency=2, duration=None, total_requests=4, timeout=5.0)
+        summary = await run_load([self.spec()], config)
+        self.assertEqual(summary.records, [])
+
+    async def test_failure_records_carry_category(self) -> None:
+        port = free_tcp_port()
+        spec = RequestSpec(url=f"http://127.0.0.1:{port}/")
+        config = RunConfig(concurrency=2, duration=None, total_requests=3, timeout=2.0)
+        summary = await run_load([spec], config, record_requests=True)
+        self.assertEqual(len(summary.records), 3)
+        for record in summary.records:
+            self.assertEqual(record.outcome, FAILURE_CONNECTION)
+            self.assertEqual(record.body_bytes, 0)
+
     async def test_requires_a_stop_condition(self) -> None:
         config = RunConfig(concurrency=1, duration=None, total_requests=None)
         with self.assertRaises(ValueError):

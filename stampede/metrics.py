@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "FAILURE_PROTOCOL",
     "FAILURE_TIMEOUT",
     "LatencyStats",
+    "RequestRecord",
     "Summary",
     "WindowStats",
     "percentile",
@@ -93,6 +94,25 @@ class WindowStats:
 
 
 @dataclass(slots=True)
+class RequestRecord:
+    """One finished request, captured for per-request CSV export.
+
+    ``timestamp`` is wall clock epoch seconds taken when the request
+    started. ``outcome`` is the HTTP status code as a string for a
+    completed request, or a failure category for a transport failure.
+    ``latency_ms`` is the measured time to the response or the failure,
+    and ``body_bytes`` is the response body size (0 for a failure).
+    """
+
+    timestamp: float
+    method: str
+    url: str
+    outcome: str
+    latency_ms: float
+    body_bytes: int
+
+
+@dataclass(slots=True)
 class Summary:
     """The final results of a run.
 
@@ -100,6 +120,9 @@ class Summary:
     status; ``failed`` counts transport level failures (timeouts,
     connection errors, protocol errors). Non-2xx responses are completed
     requests and are broken out via ``status_counts`` and ``non_2xx``.
+    ``records`` holds one entry per finished request when per-request
+    capture is enabled, and is left empty otherwise. It is not part of
+    the JSON summary produced by ``to_dict``.
     """
 
     elapsed_seconds: float
@@ -110,6 +133,7 @@ class Summary:
     latency: LatencyStats | None
     status_counts: dict[int, int]
     failure_counts: dict[str, int]
+    records: list[RequestRecord] = field(default_factory=list)
 
     @property
     def attempts(self) -> int:
@@ -142,7 +166,7 @@ class Collector:
     Runs execute on a single event loop, so no locking is needed.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, keep_records: bool = False) -> None:
         self._latencies: list[float] = []
         self._status_counts: Counter[int] = Counter()
         self._failure_counts: Counter[str] = Counter()
@@ -150,6 +174,8 @@ class Collector:
         self._attempts = 0
         self._window_attempts = 0
         self._window_latency_start = 0
+        self._keep_records = keep_records
+        self._records: list[RequestRecord] = []
 
     @property
     def attempts(self) -> int:
@@ -163,17 +189,64 @@ class Collector:
     def failed(self) -> int:
         return self._attempts - len(self._latencies)
 
-    def record_success(self, latency_ms: float, status: int, body_bytes: int) -> None:
-        """Record a request that received a full response of any status."""
+    def record_success(
+        self,
+        latency_ms: float,
+        status: int,
+        body_bytes: int,
+        *,
+        method: str | None = None,
+        url: str | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Record a request that received a full response of any status.
+
+        The keyword arguments carry per-request context used only when the
+        collector was created with ``keep_records=True``.
+        """
         self._attempts += 1
         self._latencies.append(latency_ms)
         self._status_counts[status] += 1
         self._bytes_received += body_bytes
+        if self._keep_records:
+            self._records.append(
+                RequestRecord(
+                    timestamp=timestamp if timestamp is not None else 0.0,
+                    method=method or "",
+                    url=url or "",
+                    outcome=str(status),
+                    latency_ms=latency_ms,
+                    body_bytes=body_bytes,
+                )
+            )
 
-    def record_failure(self, category: str) -> None:
-        """Record a transport level failure by category."""
+    def record_failure(
+        self,
+        category: str,
+        *,
+        method: str | None = None,
+        url: str | None = None,
+        timestamp: float | None = None,
+        latency_ms: float = 0.0,
+    ) -> None:
+        """Record a transport level failure by category.
+
+        The keyword arguments carry per-request context used only when the
+        collector was created with ``keep_records=True``.
+        """
         self._attempts += 1
         self._failure_counts[category] += 1
+        if self._keep_records:
+            self._records.append(
+                RequestRecord(
+                    timestamp=timestamp if timestamp is not None else 0.0,
+                    method=method or "",
+                    url=url or "",
+                    outcome=category,
+                    latency_ms=latency_ms,
+                    body_bytes=0,
+                )
+            )
 
     def window(self) -> WindowStats:
         """Return stats since the previous call and advance the window.
@@ -201,4 +274,5 @@ class Collector:
             latency=latency,
             status_counts=dict(self._status_counts),
             failure_counts=dict(self._failure_counts),
+            records=list(self._records),
         )

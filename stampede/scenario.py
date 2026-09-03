@@ -24,6 +24,7 @@ __all__ = [
     "WeightedPicker",
     "load_scenario",
     "make_spec",
+    "merge_headers",
 ]
 
 ALLOWED_METHODS: tuple[str, ...] = ("GET", "POST", "PUT", "DELETE", "PATCH")
@@ -75,6 +76,25 @@ def make_spec(
         body=body,
         weight=float(weight),
     )
+
+
+def merge_headers(
+    defaults: Mapping[str, str], overrides: Mapping[str, str]
+) -> dict[str, str]:
+    """Combine default headers with per-request overrides, case insensitively.
+
+    Overrides win: a default whose name matches an override, ignoring case,
+    is dropped so only the override is sent. The override keeps its own
+    casing. Used to apply the CLI ``--header`` defaults underneath the
+    headers a scenario request declares.
+    """
+    merged: dict[str, str] = dict(defaults)
+    for name, value in overrides.items():
+        lowered = name.lower()
+        for existing in [key for key in merged if key.lower() == lowered]:
+            del merged[existing]
+        merged[name] = value
+    return merged
 
 
 def load_scenario(path: str | Path) -> list[RequestSpec]:

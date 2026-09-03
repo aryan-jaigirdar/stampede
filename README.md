@@ -80,9 +80,10 @@ While a run is active, stampede prints a single updating status line:
 | `--ramp SECONDS` | 0 | Ramp workers up linearly from 1 to the full concurrency over this long. |
 | `-t, --timeout SECONDS` | 10 | Per request timeout, applied per attempt. |
 | `-X, --method METHOD` | GET | HTTP method in single URL mode. |
-| `-H, --header 'NAME: VALUE'` | | Extra request header in single URL mode. Repeatable. |
+| `-H, --header 'NAME: VALUE'` | | Extra request header. Repeatable. In single URL mode it applies to every request; in scenario mode it is a default that a per-request header overrides. |
 | `--body TEXT` | | Request body in single URL mode. |
 | `--json FILE` | | Also write the full results to FILE as JSON. |
+| `--csv FILE` | | Also write one row per request to FILE as CSV. |
 | `--seed N` | | Seed the scenario RNG for a reproducible request mix. |
 | `--insecure` | off | Skip TLS certificate verification, for self signed test hosts. |
 | `-q, --quiet` | off | Suppress the live status line. |
@@ -132,6 +133,12 @@ so typos fail loudly instead of silently skewing the mix. A bare JSON list of
 request objects works too. Pass `--seed` to make the mix reproducible across
 runs.
 
+Any `--header` values on the command line apply as defaults across every
+request in the scenario. A header a request declares itself wins over a
+default of the same name, compared case insensitively, so you can set a
+common `Authorization` or environment header once and still override it for
+individual requests.
+
 ## Sample output
 
 ```
@@ -165,6 +172,32 @@ the full status code histogram and failure counts by category. In both
 outputs, "completed" counts requests that received a full response of any
 status, "failed" counts transport level failures (timeouts, connection
 errors, protocol errors), and non-2xx responses are broken out separately.
+
+## CSV output
+
+`--csv FILE` writes a row for every finished request, which is useful for
+plotting latency over time or slicing results in a spreadsheet. The file has
+a header row followed by one row per request, with these columns:
+
+| Column | Description |
+| --- | --- |
+| `timestamp` | When the request started, as an ISO 8601 UTC timestamp. |
+| `method` | The HTTP method sent. |
+| `url` | The target URL of the request. |
+| `status` | The HTTP status code for a completed request, or the failure category (`timeout`, `connection`, or `protocol`) for a transport failure. |
+| `latency_ms` | Time from sending the request to the response or the failure, in milliseconds. |
+| `bytes` | Response body size in bytes (0 for a failure). |
+
+```console
+$ stampede http://127.0.0.1:8080/ -n 3 --csv requests.csv
+$ cat requests.csv
+timestamp,method,url,status,latency_ms,bytes
+2026-01-01T00:00:00.001000+00:00,GET,http://127.0.0.1:8080/,200,4.812,128
+2026-01-01T00:00:00.002000+00:00,GET,http://127.0.0.1:8080/,200,4.501,128
+2026-01-01T00:00:00.003000+00:00,GET,http://127.0.0.1:8080/,503,3.940,64
+```
+
+Both `--json` and `--csv` can be given in the same run.
 
 ## Design
 

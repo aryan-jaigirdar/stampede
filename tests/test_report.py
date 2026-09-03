@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
-from stampede.metrics import Collector, FAILURE_TIMEOUT
-from stampede.report import LiveReporter, format_summary, human_bytes, write_json
+from stampede.metrics import Collector, FAILURE_TIMEOUT, RequestRecord
+from stampede.report import (
+    CSV_COLUMNS,
+    LiveReporter,
+    format_summary,
+    human_bytes,
+    write_csv,
+    write_json,
+)
 
 
 def sample_summary():
@@ -74,6 +83,74 @@ class WriteJsonTests(unittest.TestCase):
         self.assertEqual(payload["failures"]["timeout"], 1)
         self.assertEqual(payload["failures"]["non_2xx"], 1)
         self.assertIsInstance(payload["latency_ms"]["p95"], float)
+
+
+class WriteCsvTests(unittest.TestCase):
+    def sample_records(self) -> list[RequestRecord]:
+        return [
+            RequestRecord(
+                timestamp=1_700_000_000.0,
+                method="GET",
+                url="http://127.0.0.1/ok",
+                outcome="200",
+                latency_ms=12.5,
+                body_bytes=128,
+            ),
+            RequestRecord(
+                timestamp=1_700_000_001.5,
+                method="POST",
+                url="http://127.0.0.1/echo",
+                outcome="404",
+                latency_ms=8.0,
+                body_bytes=64,
+            ),
+            RequestRecord(
+                timestamp=1_700_000_002.0,
+                method="GET",
+                url="http://127.0.0.1/slow",
+                outcome=FAILURE_TIMEOUT,
+                latency_ms=100.0,
+                body_bytes=0,
+            ),
+        ]
+
+    def test_header_row_and_one_row_per_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "requests.csv"
+            write_csv(self.sample_records(), str(path))
+            with path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.reader(handle))
+        self.assertEqual(rows[0], list(CSV_COLUMNS))
+        self.assertEqual(len(rows), 4)  # header plus three records
+
+    def test_fields_are_written_correctly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "requests.csv"
+            write_csv(self.sample_records(), str(path))
+            with path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        first = rows[0]
+        self.assertEqual(first["method"], "GET")
+        self.assertEqual(first["url"], "http://127.0.0.1/ok")
+        self.assertEqual(first["status"], "200")
+        self.assertEqual(first["latency_ms"], "12.500")
+        self.assertEqual(first["bytes"], "128")
+        # timestamp is ISO 8601 and round trips back to the source epoch.
+        parsed = datetime.fromisoformat(first["timestamp"])
+        self.assertEqual(parsed.timestamp(), 1_700_000_000.0)
+
+        failure = rows[2]
+        self.assertEqual(failure["status"], FAILURE_TIMEOUT)
+        self.assertEqual(failure["bytes"], "0")
+
+    def test_empty_records_writes_only_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "requests.csv"
+            write_csv([], str(path))
+            with path.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.reader(handle))
+        self.assertEqual(rows, [list(CSV_COLUMNS)])
 
 
 class LiveReporterTests(unittest.TestCase):

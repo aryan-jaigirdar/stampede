@@ -15,6 +15,7 @@ from stampede.scenario import (
     WeightedPicker,
     load_scenario,
     make_spec,
+    merge_headers,
 )
 
 
@@ -119,6 +120,35 @@ class MakeSpecTests(unittest.TestCase):
     def test_rejects_infinite_weight(self) -> None:
         with self.assertRaises(ScenarioError):
             make_spec("http://localhost/", weight=float("inf"))
+
+
+class MergeHeadersTests(unittest.TestCase):
+    def test_defaults_apply_when_no_overrides(self) -> None:
+        self.assertEqual(
+            merge_headers({"X-Env": "staging", "X-Common": "1"}, {}),
+            {"X-Env": "staging", "X-Common": "1"},
+        )
+
+    def test_override_wins_over_matching_default(self) -> None:
+        self.assertEqual(
+            merge_headers({"X-Env": "staging"}, {"X-Env": "prod"}),
+            {"X-Env": "prod"},
+        )
+
+    def test_override_is_case_insensitive_and_keeps_override_casing(self) -> None:
+        merged = merge_headers({"X-Env": "staging"}, {"x-env": "prod"})
+        self.assertEqual(merged, {"x-env": "prod"})
+
+    def test_non_matching_default_is_preserved_alongside_override(self) -> None:
+        merged = merge_headers({"X-Common": "1"}, {"X-Env": "prod"})
+        self.assertEqual(merged, {"X-Common": "1", "X-Env": "prod"})
+
+    def test_inputs_are_not_mutated(self) -> None:
+        defaults = {"X-Env": "staging"}
+        overrides = {"X-Env": "prod"}
+        merge_headers(defaults, overrides)
+        self.assertEqual(defaults, {"X-Env": "staging"})
+        self.assertEqual(overrides, {"X-Env": "prod"})
 
 
 class WeightedPickerTests(unittest.TestCase):
