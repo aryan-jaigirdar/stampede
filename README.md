@@ -78,6 +78,7 @@ While a run is active, stampede prints a single updating status line:
 | `-d, --duration SECONDS` | 10 | How long to run. The default applies only when `--requests` is not given. |
 | `-n, --requests N` | | Stop after this many requests in total. Combine with `--duration` and whichever limit is hit first ends the run. |
 | `--ramp SECONDS` | 0 | Ramp workers up linearly from 1 to the full concurrency over this long. |
+| `--rps N` | 0 | Cap the overall issue rate to about N requests per second across all workers. 0 means unlimited. |
 | `-t, --timeout SECONDS` | 10 | Per request timeout, applied per attempt. |
 | `-X, --method METHOD` | GET | HTTP method in single URL mode. |
 | `-H, --header 'NAME: VALUE'` | | Extra request header. Repeatable. In single URL mode it applies to every request; in scenario mode it is a default that a per-request header overrides. |
@@ -94,6 +95,20 @@ target is effectively down), `2` for usage errors and unresolvable hosts,
 `130` when interrupted before the run started. During a run, Ctrl+C stops
 the workers gracefully and the summary still prints with everything measured
 so far.
+
+### Rate limiting
+
+By default stampede issues requests as fast as the workers and the target
+allow. Pass `--rps N` to cap the combined issue rate to about N requests per
+second across all workers, which is useful for reproducing a specific traffic
+level or for staying under a known limit. The workers share one paced
+schedule, so slots are spread evenly rather than handed out in bursts, and a
+slow patch is never followed by a catch up spike. The cap sits alongside the
+other controls: `--concurrency` still bounds how many requests are in flight
+at once, and `--duration` or `--requests` still ends the run. A negative value
+is rejected, and `--rps 0` (the default) leaves the rate unlimited. When a cap
+is set, the end of run summary adds a `target rps` line next to the measured
+rate so you can compare the two.
 
 ## Scenario files
 
@@ -220,7 +235,10 @@ retried, so results are not double counted.
 looping request, record, repeat. `--ramp` staggers worker start times
 linearly, `--duration` and `--requests` are both stop conditions, and a
 request cap is claimed by workers before sending so the cap is exact, not
-approximate. In-flight requests are allowed to finish when the run stops.
+approximate. `--rps` adds an optional shared pacer that hands every worker its
+next slot from one monotonic schedule, so the whole run holds close to the
+target rate without bursting. In-flight requests are allowed to finish when
+the run stops.
 
 **Percentiles.** Latencies are recorded per request in milliseconds and
 percentiles use linear interpolation between closest ranks: percentile p maps

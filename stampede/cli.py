@@ -81,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="ramp workers up linearly from 1 to the full concurrency over this long",
     )
     parser.add_argument(
+        "--rps",
+        type=float,
+        default=0.0,
+        metavar="N",
+        help="cap the overall issue rate to about N requests per second (0 means unlimited)",
+    )
+    parser.add_argument(
         "-t",
         "--timeout",
         type=float,
@@ -206,6 +213,8 @@ def _build_config(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--timeout must be positive")
     if args.ramp < 0:
         parser.error("--ramp must not be negative")
+    if args.rps < 0:
+        parser.error("--rps must not be negative")
     duration = args.duration
     if duration is None and args.requests is None:
         duration = _DEFAULT_DURATION
@@ -217,6 +226,7 @@ def _build_config(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         timeout=args.timeout,
         insecure=args.insecure,
         seed=args.seed,
+        rps=args.rps,
     )
 
 

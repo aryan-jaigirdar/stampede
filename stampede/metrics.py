@@ -121,8 +121,9 @@ class Summary:
     connection errors, protocol errors). Non-2xx responses are completed
     requests and are broken out via ``status_counts`` and ``non_2xx``.
     ``records`` holds one entry per finished request when per-request
-    capture is enabled, and is left empty otherwise. It is not part of
-    the JSON summary produced by ``to_dict``.
+    capture is enabled, and is left empty otherwise. ``target_rps`` is the
+    requested rate cap when one was set, or None for an unlimited run.
+    Neither is part of the JSON summary produced by ``to_dict``.
     """
 
     elapsed_seconds: float
@@ -134,6 +135,7 @@ class Summary:
     status_counts: dict[int, int]
     failure_counts: dict[str, int]
     records: list[RequestRecord] = field(default_factory=list)
+    target_rps: float | None = None
 
     @property
     def attempts(self) -> int:

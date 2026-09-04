@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from stampede.cli import _load_specs, build_parser, main, parse_header_args
+from stampede.cli import _build_config, _load_specs, build_parser, main, parse_header_args
 
 from tests.support import TestHTTPServer, free_tcp_port
 
@@ -41,10 +41,27 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(args.duration)
         self.assertIsNone(args.requests)
         self.assertEqual(args.ramp, 0.0)
+        self.assertEqual(args.rps, 0.0)
         self.assertEqual(args.timeout, 10.0)
         self.assertEqual(args.method, "GET")
         self.assertFalse(args.quiet)
         self.assertFalse(args.insecure)
+
+    def test_rps_parses_a_positive_value(self) -> None:
+        args = build_parser().parse_args(["http://127.0.0.1:8080/", "--rps", "20"])
+        self.assertEqual(args.rps, 20.0)
+
+    def test_rps_zero_means_unlimited(self) -> None:
+        # Zero is the default, and passing it explicitly keeps the run
+        # unlimited rather than being treated as a usage error.
+        args = build_parser().parse_args(["http://127.0.0.1:8080/", "--rps", "0"])
+        self.assertEqual(args.rps, 0.0)
+        config = _build_config(args, build_parser())
+        self.assertEqual(config.rps, 0.0)
+
+    def test_rejects_negative_rps(self) -> None:
+        code = run_main_expecting_exit(["http://x/", "--rps", "-5"])
+        self.assertEqual(code, 2)
 
     def test_requires_a_target(self) -> None:
         self.assertEqual(run_main_expecting_exit([]), 2)

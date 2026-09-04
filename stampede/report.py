@@ -47,6 +47,8 @@ def format_summary(summary: Summary) -> str:
     row("requests completed", str(summary.completed))
     row("requests failed", str(summary.failed))
     row("requests per second", f"{summary.requests_per_second:.1f}")
+    if summary.target_rps is not None:
+        row("target rps", f"{summary.target_rps:g}")
     row("bytes received", human_bytes(summary.bytes_received))
 
     lines.append("")

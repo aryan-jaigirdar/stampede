@@ -8,7 +8,7 @@ import random
 import signal
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .client import Client, ProtocolError
 from .metrics import (
@@ -37,6 +37,7 @@ class RunConfig:
     timeout: float = 10.0
     insecure: bool = False
     seed: int | None = None
+    rps: float = 0.0
 
 
 def _ramp_delays(concurrency: int, ramp: float) -> list[float]:
@@ -45,6 +46,43 @@ def _ramp_delays(concurrency: int, ramp: float) -> list[float]:
         return [0.0] * concurrency
     step = ramp / (concurrency - 1)
     return [index * step for index in range(concurrency)]
+
+
+class _RatePacer:
+    """Caps the whole run to a target requests per second rate.
+
+    Workers await ``acquire`` before each request. Slots are handed out on
+    one shared monotonic schedule spaced by ``1 / rate`` seconds, so the
+    combined issue rate across every worker stays close to the target and no
+    single worker is starved. The schedule is pulled forward whenever it
+    falls behind real time, so a slow patch never banks up a burst of
+    catch up requests afterwards.
+    """
+
+    def __init__(self, rate: float, *, now: Callable[[], float] = time.monotonic) -> None:
+        if rate <= 0:
+            raise ValueError("rate must be positive")
+        self._interval = 1.0 / rate
+        self._now = now
+        self._next = now()
+
+    def _reserve(self) -> float:
+        """Reserve the next slot and return how long to wait for it.
+
+        Runs to completion without awaiting, so concurrent callers on the
+        one event loop each reserve a distinct, ordered slot.
+        """
+        now = self._now()
+        if self._next < now:
+            self._next = now
+        wait = self._next - now
+        self._next += self._interval
+        return wait
+
+    async def acquire(self) -> None:
+        wait = self._reserve()
+        if wait > 0:
+            await asyncio.sleep(wait)
 
 
 async def run_load(
@@ -71,6 +109,7 @@ async def run_load(
 
     collector = Collector(keep_records=record_requests)
     picker = WeightedPicker(specs, random.Random(config.seed))
+    pacer = _RatePacer(config.rps) if config.rps and config.rps > 0 else None
     stop = asyncio.Event()
     started = time.perf_counter()
     active_workers = 0
@@ -99,6 +138,10 @@ async def run_load(
                     stop.set()
                     break
                 spec = picker.pick()
+                if pacer is not None:
+                    await pacer.acquire()
+                    if stop.is_set():
+                        break  # deadline passed while waiting for a rate slot
                 wall_start = time.time()
                 request_started = time.perf_counter()
                 try:
@@ -198,4 +241,7 @@ async def run_load(
         if reporter is not None:
             reporter.finish()
 
-    return collector.summarize(time.perf_counter() - started)
+    summary = collector.summarize(time.perf_counter() - started)
+    if pacer is not None:
+        summary.target_rps = config.rps
+    return summary

@@ -7,7 +7,7 @@ import unittest
 
 from stampede.metrics import FAILURE_CONNECTION, FAILURE_TIMEOUT
 from stampede.report import LiveReporter
-from stampede.runner import RunConfig, _ramp_delays, run_load
+from stampede.runner import RunConfig, _RatePacer, _ramp_delays, run_load
 from stampede.scenario import RequestSpec
 
 from tests.support import TestHTTPServer, free_tcp_port
@@ -23,6 +23,34 @@ class RampDelayTests(unittest.TestCase):
     def test_linear_spacing(self) -> None:
         delays = _ramp_delays(5, 8.0)
         self.assertEqual(delays, [0.0, 2.0, 4.0, 6.0, 8.0])
+
+
+class RatePacerTests(unittest.TestCase):
+    def test_rejects_a_non_positive_rate(self) -> None:
+        with self.assertRaises(ValueError):
+            _RatePacer(0.0)
+        with self.assertRaises(ValueError):
+            _RatePacer(-1.0)
+
+    def test_slots_are_immediate_then_spaced_by_the_interval(self) -> None:
+        clock = [0.0]
+        pacer = _RatePacer(4.0, now=lambda: clock[0])  # interval 0.25 s
+        # The clock stays put, so back to back reservations each ask the
+        # caller to wait one more interval than the last.
+        self.assertAlmostEqual(pacer._reserve(), 0.0)
+        self.assertAlmostEqual(pacer._reserve(), 0.25)
+        self.assertAlmostEqual(pacer._reserve(), 0.50)
+        self.assertAlmostEqual(pacer._reserve(), 0.75)
+
+    def test_idle_does_not_bank_a_catch_up_burst(self) -> None:
+        clock = [0.0]
+        pacer = _RatePacer(10.0, now=lambda: clock[0])  # interval 0.1 s
+        self.assertAlmostEqual(pacer._reserve(), 0.0)
+        # Jump far past the schedule. The next slot is immediate rather than a
+        # backlog of catch up slots, and pacing resumes from the current time.
+        clock[0] = 5.0
+        self.assertAlmostEqual(pacer._reserve(), 0.0)
+        self.assertAlmostEqual(pacer._reserve(), 0.1)
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -61,6 +89,24 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         summary = await run_load([self.spec()], config)
         self.assertEqual(summary.completed, 12)
+
+    async def test_rps_caps_the_issue_rate_over_a_duration(self) -> None:
+        # At 20 rps over 1.5 seconds the run should issue roughly 30
+        # requests. Without a cap, workers hitting the local server would
+        # complete far more, so a generous band still proves the rate is held
+        # while leaving slack for scheduling jitter on a busy machine.
+        config = RunConfig(
+            concurrency=6, duration=1.5, total_requests=None, timeout=5.0, rps=20.0
+        )
+        summary = await run_load([self.spec()], config)
+        self.assertEqual(summary.target_rps, 20.0)
+        self.assertGreaterEqual(summary.completed, 15)
+        self.assertLessEqual(summary.completed, 45)
+
+    async def test_no_rps_cap_leaves_target_unset(self) -> None:
+        config = RunConfig(concurrency=2, duration=None, total_requests=5, timeout=5.0)
+        summary = await run_load([self.spec()], config)
+        self.assertIsNone(summary.target_rps)
 
     async def test_connection_failures_are_categorized(self) -> None:
         port = free_tcp_port()
