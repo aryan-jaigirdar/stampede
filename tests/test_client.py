@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from stampede.client import (
     Client,
@@ -11,6 +12,7 @@ from stampede.client import (
     HTTPConnection,
     ProtocolError,
     parse_url,
+    _build_headers,
 )
 
 from tests.support import TestHTTPServer, free_tcp_port
@@ -41,6 +43,10 @@ class ParseURLTests(unittest.TestCase):
     def test_rejects_missing_host(self) -> None:
         with self.assertRaises(ValueError):
             parse_url("http:///nohost")
+
+    def test_ipv6_host_header_keeps_literal_brackets(self) -> None:
+        self.assertEqual(_build_headers(parse_url("http://[::1]:8080/"), None, None)["Host"], "[::1]:8080")
+        self.assertEqual(_build_headers(parse_url("http://[::1]/"), None, None)["Host"], "[::1]")
 
 
 class ClientAgainstLocalServerTests(unittest.IsolatedAsyncioTestCase):
@@ -277,6 +283,19 @@ class RawSocketBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConnectionUnitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_idempotent_requests_are_not_retried_after_an_ambiguous_disconnect(self) -> None:
+        for method in ("POST", "PATCH"):
+            with self.subTest(method=method):
+                client = Client()
+                request = AsyncMock(side_effect=ConnectionClosed("no response", stale=True))
+                with patch.object(HTTPConnection, "request", request):
+                    try:
+                        with self.assertRaises(ConnectionClosed):
+                            await client.request(method, "http://localhost/", body=b"mutation")
+                        self.assertEqual(request.await_count, 1)
+                    finally:
+                        await client.aclose()
+
     async def test_connection_tracks_completed_requests(self) -> None:
         server = TestHTTPServer()
         server.start()

@@ -30,6 +30,7 @@ __all__ = [
 
 DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
 USER_AGENT = f"stampede/{__version__}"
+_RETRYABLE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
 
 
 class ClientError(Exception):
@@ -44,8 +45,8 @@ class ConnectionClosed(ClientError, ConnectionError):
     """The connection closed before a full response was received.
 
     ``stale`` is True when a previously used keep-alive connection turned
-    out to be dead before any response bytes arrived, which makes the
-    request safe to retry on a fresh connection.
+    out to be dead. This permits a fresh-connection retry only when the
+    request method is idempotent; it does not prove the server did no work.
     """
 
     def __init__(self, message: str, *, stale: bool = False) -> None:
@@ -222,8 +223,8 @@ class HTTPConnection:
         """Send one request and read the full response.
 
         Reuses the open connection when possible. Raises ConnectionClosed
-        with ``stale=True`` when a reused connection died before any
-        response bytes arrived, so callers can retry safely.
+        with ``stale=True`` when a reused connection fails with a disconnect.
+        The client uses method semantics to decide whether to retry.
         """
         reused = self.is_open and self.completed_requests > 0
         if not self.is_open:
@@ -317,8 +318,9 @@ class Client:
     """Issues requests, pooling one keep-alive connection per origin.
 
     Each request is bounded by ``timeout`` seconds per attempt. When a
-    reused keep-alive connection turns out to be stale, the request is
-    retried once on a fresh connection.
+    reused keep-alive connection turns out to be stale, an idempotent
+    request is retried once on a fresh connection. POST and PATCH are
+    never retried automatically.
     """
 
     def __init__(self, *, timeout: float = 10.0, insecure: bool = False) -> None:
@@ -353,7 +355,9 @@ class Client:
                 await connection.close()
                 raise
             except ConnectionClosed as exc:
-                if exc.stale and attempt == 0:
+                # No response does not prove the server did not apply the
+                # request. Only retry methods with idempotent semantics.
+                if exc.stale and attempt == 0 and method.upper() in _RETRYABLE_METHODS:
                     continue
                 raise
             except OSError:
@@ -372,7 +376,7 @@ def _build_headers(
     parsed: ParsedURL, user_headers: Mapping[str, str] | None, body: bytes | None
 ) -> dict[str, str]:
     """Merge default headers with user headers, case insensitively."""
-    host = parsed.host
+    host = f"[{parsed.host}]" if ":" in parsed.host else parsed.host
     if parsed.port != DEFAULT_PORTS[parsed.scheme]:
         host = f"{host}:{parsed.port}"
     merged: dict[str, str] = {
