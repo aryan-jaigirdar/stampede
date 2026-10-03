@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import socket
 import sys
 from dataclasses import replace
@@ -203,6 +204,10 @@ def _load_specs(args: argparse.Namespace, parser: argparse.ArgumentParser) -> li
 
 
 def _build_config(args: argparse.Namespace, parser: argparse.ArgumentParser) -> RunConfig:
+    for option in ("duration", "timeout", "ramp", "rps"):
+        value = getattr(args, option)
+        if value is not None and not math.isfinite(value):
+            parser.error(f"--{option} must be finite")
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")
     if args.requests is not None and args.requests < 1:

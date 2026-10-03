@@ -63,6 +63,12 @@ class ParserTests(unittest.TestCase):
         code = run_main_expecting_exit(["http://x/", "--rps", "-5"])
         self.assertEqual(code, 2)
 
+    def test_rejects_non_finite_timing_and_rate_options(self) -> None:
+        for option in ("--duration", "--timeout", "--ramp", "--rps"):
+            for value in ("nan", "inf", "-inf"):
+                with self.subTest(option=option, value=value):
+                    self.assertEqual(run_main_expecting_exit(["http://x/", f"{option}={value}"]), 2)
+
     def test_requires_a_target(self) -> None:
         self.assertEqual(run_main_expecting_exit([]), 2)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import unittest
 
@@ -75,6 +76,24 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.failed, 0)
         self.assertEqual(summary.status_counts, {200: 25})
         self.assertGreater(summary.bytes_received, 0)
+
+    async def test_request_cap_is_exact_with_more_workers_than_rate_limited_requests(self) -> None:
+        config = RunConfig(concurrency=8, duration=None, total_requests=5, rps=100.0)
+        summary = await run_load([self.spec()], config)
+        self.assertEqual(summary.completed, 5)
+        self.assertEqual(summary.failed, 0)
+
+    async def test_request_cap_does_not_wait_for_an_unused_rate_slot(self) -> None:
+        config = RunConfig(concurrency=3, duration=None, total_requests=1, rps=0.1)
+        summary = await asyncio.wait_for(run_load([self.spec()], config), timeout=1.0)
+        self.assertEqual(summary.completed, 1)
+        self.assertEqual(summary.failed, 0)
+
+    async def test_duration_interrupts_workers_waiting_for_a_distant_rate_slot(self) -> None:
+        config = RunConfig(concurrency=3, duration=0.05, rps=0.1)
+        summary = await asyncio.wait_for(run_load([self.spec()], config), timeout=1.0)
+        self.assertEqual(summary.completed, 1)
+        self.assertLess(summary.elapsed_seconds, 1.0)
 
     async def test_duration_stops_the_run(self) -> None:
         config = RunConfig(concurrency=2, duration=0.4, total_requests=None, timeout=5.0)
@@ -175,6 +194,20 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         config = RunConfig(concurrency=1, duration=None, total_requests=None)
         with self.assertRaises(ValueError):
             await run_load([self.spec()], config)
+
+    async def test_rejects_invalid_limits_before_starting_workers(self) -> None:
+        configs = [
+            RunConfig(rps=float("nan")),
+            RunConfig(rps=float("inf")),
+            RunConfig(rps=-1),
+            RunConfig(timeout=0),
+            RunConfig(duration=0),
+            RunConfig(total_requests=0),
+        ]
+        for config in configs:
+            with self.subTest(config=config):
+                with self.assertRaises(ValueError):
+                    await run_load([self.spec()], config)
 
     async def test_live_reporter_receives_ticks(self) -> None:
         stream = io.StringIO()

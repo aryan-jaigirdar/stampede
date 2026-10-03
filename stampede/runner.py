@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 import signal
 import time
@@ -79,10 +80,15 @@ class _RatePacer:
         self._next += self._interval
         return wait
 
-    async def acquire(self) -> None:
+    async def acquire(self, stop: asyncio.Event) -> bool:
         wait = self._reserve()
         if wait > 0:
-            await asyncio.sleep(wait)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=wait)
+                return False
+            except TimeoutError:
+                pass
+        return not stop.is_set()
 
 
 async def run_load(
@@ -106,6 +112,18 @@ async def run_load(
         raise ValueError("a duration or a total request cap is required")
     if config.concurrency < 1:
         raise ValueError("concurrency must be at least 1")
+    for name in ("duration", "timeout", "ramp", "rps"):
+        value = getattr(config, name)
+        if value is not None and not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if config.duration is not None and config.duration <= 0:
+        raise ValueError("duration must be positive")
+    if config.total_requests is not None and config.total_requests < 1:
+        raise ValueError("total_requests must be at least 1")
+    if config.timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if config.ramp < 0 or config.rps < 0:
+        raise ValueError("ramp and rps must not be negative")
 
     collector = Collector(keep_records=record_requests)
     picker = WeightedPicker(specs, random.Random(config.seed))
@@ -120,6 +138,10 @@ async def run_load(
         if config.total_requests is not None and claimed >= config.total_requests:
             return False
         claimed += 1
+        if claimed == config.total_requests:
+            # This worker still sends its claimed request. Wake other
+            # workers now so they do not wait for unused rate/ramp slots.
+            stop.set()
         return True
 
     async def worker(start_delay: float) -> None:
@@ -134,14 +156,15 @@ async def run_load(
         client = Client(timeout=config.timeout, insecure=config.insecure)
         try:
             while not stop.is_set():
+                if pacer is not None and not await pacer.acquire(stop):
+                    break
+                # Claim at send time. Pending rate slots are not requests:
+                # claiming them early lets another worker stop a capped run
+                # before those requests have actually been sent.
                 if not claim():
                     stop.set()
                     break
                 spec = picker.pick()
-                if pacer is not None:
-                    await pacer.acquire()
-                    if stop.is_set():
-                        break  # deadline passed while waiting for a rate slot
                 wall_start = time.time()
                 request_started = time.perf_counter()
                 try:
