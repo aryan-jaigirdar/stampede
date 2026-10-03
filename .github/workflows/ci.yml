@@ -4,15 +4,23 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
-      - name: Set up Python 3.12
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Run the test suite
         run: python3 -m unittest discover -s tests
+      - name: Run the local demo
+        run: python3 -m examples.demo

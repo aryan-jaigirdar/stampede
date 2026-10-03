@@ -38,6 +38,24 @@ Or skip installation entirely and run it from a checkout:
 $ python3 -m stampede http://127.0.0.1:8080/ -c 20 -d 10
 ```
 
+## Run a self-contained demo
+
+```sh
+python3 -m examples.demo --json results.json --csv requests.csv
+```
+
+This starts its own HTTP server on a temporary loopback port, sends exactly
+30 requests from a seeded mix at a target of 100 requests per second, then
+stops the server. It needs no external target or test dependencies. The demo
+includes deliberate HTTP 429 responses, so you can inspect the distinction
+between complete error responses and transport failures. JSON and CSV come
+from the measured requests. Latency and achieved throughput vary by machine.
+
+The seed produces 25 HTTP 200 responses and 5 HTTP 429 responses for this
+mix. Inspect `results.json` for aggregate metrics and `requests.csv` for each
+request. The demo asserts the completed count and records no fabricated
+latency or throughput numbers.
+
 ## Quickstart
 
 Hammer one URL with 25 workers for 60 seconds, ramping the workers up over
@@ -226,19 +244,23 @@ the connection. TLS comes from the standard `ssl` module.
 **Keep-alive with stale connection retry.** Each worker holds one persistent
 connection per origin and reuses it across iterations, which is what real
 clients do and what keeps the tool fast. A reused keep-alive connection can
-always have been closed by the server between requests; when that happens
-before any response bytes arrive, the request is retried exactly once on a
-fresh connection. Failures after response bytes have arrived are never
-retried, so results are not double counted.
+always have been closed by the server between requests. The client permits
+one retry for idempotent methods such as GET, PUT, and DELETE. POST and PATCH are not retried automatically: a missing response
+cannot prove that the server did not apply a mutation. A retried request is
+still one measured attempt, so the request cap counts logical requests,
+not every possible wire transmission.
 
 **Load model.** N workers run as asyncio tasks on one event loop, each
 looping request, record, repeat. `--ramp` staggers worker start times
 linearly, `--duration` and `--requests` are both stop conditions, and a
-request cap is claimed by workers before sending so the cap is exact, not
-approximate. `--rps` adds an optional shared pacer that hands every worker its
-next slot from one monotonic schedule, so the whole run holds close to the
-target rate without bursting. In-flight requests are allowed to finish when
-the run stops.
+request cap is claimed at send time, after rate pacing, so waiting workers
+cannot consume the budget and then cancel unsent requests. The cap is exact
+when a duration or interruption does not stop the run first. `--rps` adds
+an optional shared pacer that hands every worker its next slot from one monotonic schedule, so the whole run holds close to the
+target rate without bursting. Workers waiting for rate slots wake when the
+run stops; only requests already in flight are allowed to finish. Timing and
+rate inputs reject NaN and infinity so a malformed cap cannot become an
+unlimited run.
 
 **Percentiles.** Latencies are recorded per request in milliseconds and
 percentiles use linear interpolation between closest ranks: percentile p maps
